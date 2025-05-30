@@ -1,22 +1,40 @@
 import os
-from openai import AzureOpenAI
-import tenacity
+import json
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
+
+model_name = "Qwen/Qwen3-0.6B"
+qwen_tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+qwen_model = AutoModelForCausalLM.from_pretrained(
+    model_name, 
+    trust_remote_code=True, 
+    device_map="auto",
+    low_cpu_mem_usage=True
+)
+
+def call_qwen(messages):
+    text = ""
+    for msg in messages:
+        if msg["role"] == "system":
+            text += f"[System]\n{msg['content']}\n"
+        elif msg["role"] == "user":
+            text += f"[User]\n{msg['content']}\n"
+        elif msg["role"] == "assistant":
+            text += f"[Assistant]\n{msg['content']}\n"
+
+    inputs = qwen_tokenizer(text, return_tensors="pt").to(qwen_model.device)
+    outputs = qwen_model.generate(
+        **inputs,
+        max_new_tokens=512,
+        pad_token_id=qwen_tokenizer.eos_token_id
+    )
+    reply = qwen_tokenizer.decode(outputs[0][inputs.input_ids.shape[-1]:], skip_special_tokens=True)
+    return reply.strip()
 
 class ChatGPTTalker():
     def __init__(self, prompt_type='paper'):
         self.prompt_type = prompt_type
         
-        self.client = AzureOpenAI(
-            api_version='2023-05-15',
-            api_key=os.getenv('AZURE_OPENAI_API_KEY'),
-            azure_endpoint=os.getenv('AZURE_OPENAI_ENDPOINT'),
-        )
-        self.deployment_name = "azure-gpt-35-turbo"
-
-    @tenacity.retry(wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
-                    stop=tenacity.stop_after_attempt(5),
-                    reraise=True)
     def ask_objects_gpt(self, text, all_objects):
         object_string = ', '.join(all_objects)
         if self.prompt_type == 'paper':
@@ -56,21 +74,13 @@ class ChatGPTTalker():
         else:
             raise NotImplementedError
                 
-        response = self.client.chat.completions.create(
-            model=self.deployment_name,
-            messages=messages,
-            temperature=0.5,
-        )
+        response = call_qwen(messages)
         return {
-            'response': response.choices[0].message.content,
+            'response': response,
             'input_text': text,
             'input_object': object_string,
         }
     
-    
-    @tenacity.retry(wait=tenacity.wait_exponential(multiplier=1, min=4, max=10),
-                    stop=tenacity.stop_after_attempt(5),
-                    reraise=True)
     def ask_relation_gpt(self, text, relations, target_object, anchor_objects):
         assert relations != []
         all_relations = [v for k, v in relations.items()]
@@ -104,18 +114,12 @@ class ChatGPTTalker():
         else:
             raise NotImplementedError
         
-        response = self.client.chat.completions.create(
-            model=self.deployment_name,
-            messages=messages,
-            temperature=0.5,
-            max_tokens=300,
-        )
+        response = call_qwen(messages)
         return {
-            'response': response.choices[0].message.content,
+            'response': response,
             'input_text': text,
             'input_relation': relation_string,
         }
-    
     
     def check_objects(self, response, all_objects):
         lines = response['response'].split('\n')
